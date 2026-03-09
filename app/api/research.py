@@ -25,8 +25,8 @@ router = APIRouter()
 @router.post("/research", response_model=ResearchResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_research_job(
     research_request: ResearchRequest,
-    current_session: UserSession = Depends(get_current_session), # Auth Session Pending
-    db: Session = Depends(get_db) # DB Session Pending
+    current_session: UserSession = Depends(get_current_session),
+    db: Session = Depends(get_db)
 ):
     """Accept a research task and return a job_id
 

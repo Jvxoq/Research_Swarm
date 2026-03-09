@@ -94,3 +94,4 @@ class VectorDB:
 def get_vectordb() -> VectorDB:
     """Get singleton VectorDB instance."""
     return VectorDB()
+
