@@ -23,10 +23,6 @@ class StreamingService:
         self.db_service = db_service
         self.graph = graph
 
-    def _check_job_ownership(self, job, user_id) -> bool:
-        """Check if user owns the job."""
-        return job.user_id == user_id
-
     def _convert_event_to_sse(self, event: dict) -> str | None:
         """Convert LangGraph event to SSE message."""
         if event.get("event") != "on_chain_end":
@@ -59,13 +55,14 @@ class StreamingService:
         """
         Stream graph execution progress to client.
 
-        Flow:
-            1. Yield 'started' event
-            2. Execute graph and yield node completion events
-            3. Get final state
-            4. Save report to database
-            5. Update job status to 'completed'
-            6. Yield 'complete' event with final report
+        Event structure:
+        {
+            "event": "on_chain_end",
+            "name": "orchestrator_node",
+            "run_id": "abc-123",
+            "data": {...},
+            "metadata": {...}
+        }
         """
         job_uuid = uuid.UUID(job_id)
 
@@ -74,7 +71,7 @@ class StreamingService:
                 "thread_id": job_id,
             }
         }
-
+        
         input_data = {
             "topic": topic,
             "retry_count": 0,
@@ -90,6 +87,8 @@ class StreamingService:
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )
+
+        self.db_service.update_job_status(job_id, "running")
 
         async for event in self.graph.astream_events(input_data, config, version="v2"):
             sse_message = self._convert_event_to_sse(event)

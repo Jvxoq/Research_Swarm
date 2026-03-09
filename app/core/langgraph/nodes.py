@@ -1,11 +1,18 @@
 # app/core/langgraph/nodes.py
 """Agent nodes for research graph."""
+
 from typing import List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langgraph.types import Send
-from app.core.langgraph.state import SwarmState, WorkerResult, VerifiedFact, SubTasksOutput, FinalReport
+from app.core.langgraph.state import (
+    SwarmState,
+    WorkerResult,
+    VerifiedFact,
+    SubTasksOutput,
+    FinalReport,
+)
 from app.core.langgraph.tools import get_web_search_tool, fetch_url
 from app.services.llm import llm_service
 from app.services.vectordb import get_vectordb
@@ -14,8 +21,6 @@ from pydantic import BaseModel
 from app.core.langgraph.state import SwarmState, VerifiedFact, ApprovedFact
 from collections import defaultdict
 import uuid
-
-
 
 
 # Orchestrator Node
@@ -36,33 +41,33 @@ Topic: {topic}"""
 def orchestrator_node(state: SwarmState) -> dict:
     """Break down research topic into sub-tasks."""
     logger.info("orchestrator_started", topic=state["topic"])
-    
+
     llm_client = llm_service.client()
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a research planning assistant."),
-        ("human", ORCHESTRATOR_PROMPT)
-    ])
-    
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are a research planning assistant."),
+            ("human", ORCHESTRATOR_PROMPT),
+        ]
+    )
+
     chain = prompt | llm_client | JsonOutputParser()
     result = chain.invoke({"topic": state["topic"]})
-    
+
     # Validate
     validated = SubTasksOutput.model_validate(result)
-    
+
     logger.info("orchestrator_complete", sub_tasks=validated.sub_tasks)
     return {"sub_tasks": validated.sub_tasks}
+
 
 # Router Node
 def router_node(state: SwarmState):
     """Route tasks to workers in parallel."""
     tasks = state.get("failed_tasks") or state["sub_tasks"]
-    
+
     logger.info("routing_tasks", task_count=len(tasks))
-    
-    return [
-        Send("worker_node", {"task": task})
-        for task in tasks
-    ]
+
+    return [Send("worker_node", {"task": task}) for task in tasks]
 
 
 # Worker Node
@@ -86,26 +91,28 @@ def worker_node(state: dict) -> dict:
     """Search web and extract findings."""
     task = state["task"]
     logger.info("worker_started", task=task)
-    
+
     # Get tools
     web_search = get_web_search_tool()
     llm_client = llm_service.client()
-    
+
     # Search web
     search_results = web_search.invoke(task)
-    
+
     # Extract claim from results
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a research assistant."),
-        ("human", WORKER_PROMPT + f"\n\nSearch results:\n{search_results}")
-    ])
-    
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are a research assistant."),
+            ("human", WORKER_PROMPT + f"\n\nSearch results:\n{search_results}"),
+        ]
+    )
+
     chain = prompt | llm_client | JsonOutputParser()
     result = chain.invoke({"task": task})
-    
+
     # Validate
     validated = WorkerResult.model_validate(result)
-    
+
     logger.info("worker_complete", task=task, confidence=validated.confidence)
     return {"worker_results": [validated]}
 
@@ -132,48 +139,49 @@ Return JSON:
 def critic_node(state: SwarmState) -> dict:
     """Verify worker results."""
     logger.info("critic_started", result_count=len(state["worker_results"]))
-    
+
     llm_client = llm_service.client()
     verified = []
     failed_tasks = []
-    
+
     for result in state["worker_results"]:
         # Fetch URL content
         content = fetch_url.invoke(result.source_url)
-        
+
         # Verify claim
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a fact-checking assistant."),
-            ("human", CRITIC_PROMPT)
-        ])
-        
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", "You are a fact-checking assistant."), ("human", CRITIC_PROMPT)]
+        )
+
         chain = prompt | llm_client | JsonOutputParser()
-        fact = chain.invoke({
-            "task": result.task,
-            "claim": result.claim,
-            "source_url": result.source_url,
-            "content": content
-        })
-        
+        fact = chain.invoke(
+            {
+                "task": result.task,
+                "claim": result.claim,
+                "source_url": result.source_url,
+                "content": content,
+            }
+        )
+
         verified_fact = VerifiedFact.model_validate(fact)
-        
+
         if verified_fact.confidence >= 0.75:
             verified.append(verified_fact)
         else:
             failed_tasks.append(verified_fact.task)
-    
+
     logger.info("critic_complete", verified=len(verified), failed=len(failed_tasks))
     return {
         "verified_facts": verified,
         "failed_tasks": failed_tasks,
-        "retry_count": state["retry_count"] + (1 if failed_tasks else 0)
+        "retry_count": state["retry_count"] + (1 if failed_tasks else 0),
     }
 
 
 def consensus_node(state: SwarmState) -> dict:
     """
     Cluster similar facts and apply voting.
-    
+
     Flow:
     1. Store all verified facts in VectorDB
     2. For each fact, find similar facts (≥0.85 similarity)
@@ -182,44 +190,43 @@ def consensus_node(state: SwarmState) -> dict:
     5. Return approved and rejected lists
     """
     logger.info("consensus_started", fact_count=len(state["verified_facts"]))
-    
+
     vectordb = get_vectordb()
-    
-    # Clear collection for this job (isolate per-job)
-    vectordb.clear_collection()
-    
-    # STEP 1: Store all facts in VectorDB
+
+    # Create collection per job
+    vectordb.create_collection(state.thread_id)
+
+    # Store all facts in VectorDB
     fact_map = {}  # fact_id -> VerifiedFact
-    
+
     for fact in state["verified_facts"]:
         fact_id = str(uuid.uuid4())
         fact_map[fact_id] = fact
-        
+
         vectordb.store_fact(
+            collection=state.thread_id,
             fact_id=fact_id,
             claim=fact.claim,
             metadata={
                 "task": fact.task,
                 "source_url": fact.source_url,
-                "confidence": fact.confidence
-            }
+                "confidence": fact.confidence,
+            },
         )
-    
+
     # Find Clusters
     processed = set()
     clusters = []
-    
+
     for fact_id, fact in fact_map.items():
         if fact_id in processed:
             continue
-        
+
         # Find similar facts
         similar = vectordb.find_similar(
-            claim=fact.claim,
-            limit=10,
-            threshold=0.85
+            collection=state.thread_id, claim=fact.claim, limit=10, threshold=0.85
         )
-        
+
         # Build cluster
         cluster = []
         for hit in similar:
@@ -227,17 +234,16 @@ def consensus_node(state: SwarmState) -> dict:
             if hit_id not in processed:
                 cluster.append(fact_map[hit_id])
                 processed.add(hit_id)
-        
+
         if cluster:
             clusters.append(cluster)
-    
+
     logger.info("clustering_complete", cluster_count=len(clusters))
-    
 
     MIN_SOURCES = 2
     approved = []
     rejected = []
-    
+
     for cluster in clusters:
         if len(cluster) >= MIN_SOURCES:
             # Approved: corroborated by multiple sources
@@ -245,35 +251,27 @@ def consensus_node(state: SwarmState) -> dict:
                 claim=cluster[0].claim,  # Use first claim as canonical
                 sources=[f.source_url for f in cluster],
                 confidence=sum(f.confidence for f in cluster) / len(cluster),  # Average
-                task=cluster[0].task
+                task=cluster[0].task,
             )
             approved.append(approved_fact)
-            
+
             logger.debug(
                 "fact_approved",
                 claim=approved_fact.claim[:50],
-                source_count=len(cluster)
+                source_count=len(cluster),
             )
         else:
             # Rejected: isolated claim
             rejected.extend(cluster)
-            
+
             logger.debug(
-                "fact_rejected",
-                claim=cluster[0].claim[:50],
-                reason="isolated"
+                "fact_rejected", claim=cluster[0].claim[:50], reason="isolated"
             )
-    
-    logger.info(
-        "consensus_complete",
-        approved=len(approved),
-        rejected=len(rejected)
-    )
-    
-    return {
-        "approved_facts": approved,
-        "rejected_facts": rejected
-    }
+
+    logger.info("consensus_complete", approved=len(approved), rejected=len(rejected))
+
+    return {"approved_facts": approved, "rejected_facts": rejected}
+
 
 # app/core/langgraph/nodes.py
 
@@ -306,10 +304,7 @@ Return ONLY valid JSON (no explanation):
 
 def writer_node(state: SwarmState) -> dict:
     """Compile approved facts into final markdown report."""
-    logger.info(
-        "writer_started",
-        approved_count=len(state["approved_facts"])
-    )
+    logger.info("writer_started", approved_count=len(state["approved_facts"]))
 
     facts_text = []
     for i, fact in enumerate(state["approved_facts"], 1):
@@ -322,29 +317,33 @@ Fact {i}:
   Sources: {sources_list}
 """
         facts_text.append(fact_block)
-    
+
     formatted_facts = "\n".join(facts_text)
 
     llm_client = llm_service.client()
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a professional research report writer."),
-        ("human", WRITER_PROMPT)
-    ])
-    
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are a professional research report writer."),
+            ("human", WRITER_PROMPT),
+        ]
+    )
+
     chain = prompt | llm_client | JsonOutputParser()
-    
-    result = chain.invoke({
-        "topic": state["topic"],
-        "facts": formatted_facts,
-    })
-    
+
+    result = chain.invoke(
+        {
+            "topic": state["topic"],
+            "facts": formatted_facts,
+        }
+    )
+
     final_report = FinalReport(
         title=result["title"],
         report=result["report"],
-        generated_at=datetime.utcnow().isoformat()
+        generated_at=datetime.utcnow().isoformat(),
     )
-    
+
     logger.info("writer_complete", title=final_report.title)
-    
+
     return {"final_report": final_report}

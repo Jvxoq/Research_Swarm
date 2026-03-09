@@ -2880,7 +2880,7 @@ requires-dist = [
     { name = "httptools", specifier = "==0.7.1" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "httpx-sse", specifier = "==0.4.3" },
-    { name = "huggingface-hub", specifier = "==1.1.7" },
+    { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "idna", specifier = "==3.11" },
     { name = "importlib-metadata", specifier = "==8.7.1" },
     { name = "jinja2", specifier = "==3.1.6" },

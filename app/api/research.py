@@ -87,8 +87,7 @@ async def stream_research_job_status(
             job_id=job_id,
             user_id=str(current_session.id)
         )
-        # Initialise the depencies for the Streaming Service
-        # db_service - To store the research job progress
+        
         db_service = DatabaseService(db)
         graph = get_graph()
         stream_service = StreamingService(db_service, graph)
