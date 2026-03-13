@@ -1,4 +1,3 @@
-# app/core/langgraph/nodes.py
 """Agent nodes for research graph."""
 
 from typing import List
