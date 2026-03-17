@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from sqlmodel import SQLModel
 from app.db.session import engine
@@ -10,17 +10,18 @@ from app.core.logging import setup_logging, logger
 from app.core.langgraph.graph import get_graph
 from app.api.research import router as research_router
 
+load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Startup and shutdown events.
-    
+
     Startup:
     - Initialize logging
     - Preload LangGraph (warm start)
     - Log app start
-    
+
     Shutdown:
     - Log graceful shutdown
     """
@@ -30,7 +31,6 @@ async def lifespan(app: FastAPI):
     logger.info(
         "application_startup",
         app_name="Research-Agent",
-
     )
     # Creates the tables in the db
     SQLModel.metadata.create_all(engine)
@@ -38,12 +38,13 @@ async def lifespan(app: FastAPI):
     logger.info("preloading_langgraph")
     get_graph()
     logger.info("langgraph_ready")
-    
+
     logger.info("application_ready")
-    
+
     yield  # App runs here
 
     logger.info("application_shutdown")
+
 
 app = FastAPI(
     title="Research Swarm API",
@@ -60,6 +61,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -69,18 +71,13 @@ async def global_exception_handler(request: Request, exc: Exception):
         path=request.url.path,
         method=request.method,
         error=str(exc),
-        exc_info=True
+        exc_info=True,
     )
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"}
-    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-app.include_router(
-    research_router,
-    prefix="/api",
-    tags=["research"]
-)
+
+app.include_router(research_router, prefix="/api", tags=["research"])
+
 
 @app.get("/")
 async def root():
@@ -91,6 +88,6 @@ async def root():
         "docs": "/docs",
         "endpoints": {
             "create_job": "POST /api/research",
-            "stream_job": "GET /api/research/{job_id}/stream"
-        }
+            "stream_job": "GET /api/research/{job_id}/stream",
+        },
     }
