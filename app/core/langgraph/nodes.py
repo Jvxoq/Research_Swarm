@@ -1,4 +1,5 @@
-from typing import List
+from dotenv import load_dotenv
+load_dotenv()
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -14,60 +15,51 @@ from app.core.langgraph.tools import web_search_tool, fetch_content
 from app.services.llm import llm_service
 from app.services.vectordb import get_vectordb
 from app.core.logging import logger
-from pydantic import BaseModel
 from app.core.langgraph.state import SwarmState, VerifiedFact, ApprovedFact
-from collections import defaultdict
 import uuid
-from dotenv import load_dotenv
-
-load_dotenv()
 
 
 # Orchestrator Node
 ORCHESTRATOR_PROMPT = """
+CRITICAL: 
+Follow INSTRUCTIONS & RULES.
+
+INSTRUCTION:
 You are a Research Orchestrator.
-
-Search Results: {current_info}
-
-Given the TOPIC below, generate EXACTLY 3 research sub-tasks.
-
-Rules:
-- Each sub-task must be a specific research question
-- No overlapping questions
-- Return ONLY valid JSON with key "sub_tasks"
+Given the TOPIC & CURRENT INFORMATION, generate EXACTLY 3 deep question as research sub-tasks
+about the TOPIC.
 
 TOPIC: {topic}
+CURRENT INFORMATION: {current_info}
 
-OUTPUT FORMAT (exactly this structure):
-{{"sub_tasks": ["question1", "question2", "question3"]}}
+RULES:
+- Each sub-task must be a specific research question
+- No overlapping questions
+- Return ONLY valid JSON with key: sub_tasks & value: the list of sub-tasks.
 """
-
 
 def orchestrator_node(state: SwarmState) -> dict:
     """Break down research topic into sub-tasks."""
     logger.info("orchestrator_started", topic=state["topic"])
 
-    current_info = web_search_tool.invoke(
+    search_result = web_search_tool.invoke(
         f"Latest Information Regarding - {state['topic']}"
     )
 
+    current_info = ""
+    if search_result:
+        for result in search_result['results']:
+            current_info = current_info + result['content']
+
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", "You are a research planning assistant."),
+            ("system", "Return ONLY valid JSON. No explanation, no markdown, no extra text."),
             ("human", ORCHESTRATOR_PROMPT),
         ]
     )
 
-    chain = prompt | llm_service.client | JsonOutputParser()
+    chain = prompt | llm_service.gemini_client | JsonOutputParser()
     result = chain.invoke({"topic": state["topic"], "current_info": current_info})
-
-    # Handle case where LLM returns different format
-    if not isinstance(result, dict) or "sub_tasks" not in result:
-        result = {
-            "sub_tasks": list(result.values())
-            if isinstance(result, dict)
-            else [str(result)]
-        }
 
     # Validate
     validated = SubTasksOutput.model_validate(result)
@@ -77,7 +69,11 @@ def orchestrator_node(state: SwarmState) -> dict:
 
 # Router Node
 def router_node(state: SwarmState):
-    """Route tasks to workers in parallel."""
+    """Route tasks to workers in parallel.
+    
+    Input from Orchestrator:
+    
+    ['What is the current ...', 'How do upgrades ...', "What is the total ..."]"""
     tasks = state.get("failed_tasks") or state["sub_tasks"]
 
     logger.info("routing_tasks", task_count=len(tasks))
@@ -108,8 +104,8 @@ def worker_node(state: dict) -> dict:
     logger.info("worker_started", task=task)
 
     # Get tools
-    web_search = web_search_tool()
-    llm_client = llm_service.client()
+    web_search = web_search_tool
+    llm_client = llm_service.client
 
     # Search web
     search_results = web_search.invoke(task)
@@ -155,7 +151,7 @@ def critic_node(state: SwarmState) -> dict:
     """Verify worker results."""
     logger.info("critic_started", result_count=len(state["worker_results"]))
 
-    llm_client = llm_service.client()
+    llm_client = llm_service.client
     verified = []
     failed_tasks = []
 
