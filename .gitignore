@@ -10,7 +10,7 @@ wheels/
 .python-version
 research_agent.egg-info
 rough.py
-
+result.txt
 # Virtual environments
 .venv
 
