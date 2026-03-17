@@ -1,16 +1,18 @@
 """
 Create a singleton class for the LLM client
 """
+
 from typing import Optional, cast
 from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from app.core.config import settings
 from app.core.logging import logger
 
 
 class LLMService:
     _instance: Optional["LLMService"] = None
-    _client: Optional[BaseChatModel] = None
+    _gemini_client: Optional[BaseChatModel] = None
 
     def __new__(cls) -> "LLMService":
         # Create an instance of this class if not already created
@@ -19,29 +21,25 @@ class LLMService:
         return cls._instance
 
     @property
-    def client(self) -> BaseChatModel:
-        # Define the Client as class attribute
-        if self._client is None:
+    def gemini_client(self) -> BaseChatModel:
+        if self._gemini_client is None:
             logger.info(
-                "Initialising_llm_client",
-                model=settings.ollama_model,
+                "Initialising_gemini_client",
+                model=settings.gemini_model,
             )
 
-            LLMService._client = ChatOllama(
-                model=settings.ollama_model,
-                base_url=settings.ollama_base_url,
-                num_predict=2000,
-                num_ctx=1024,
-                keep_alive=-1,
+            LLMService._gemini_client = ChatGoogleGenerativeAI(
+                model=settings.gemini_model,
+                google_api_key=settings.gemini_api_key,
                 temperature=0,
-                format="json",
             )
 
             logger.info(
-                "Initialised_llm_client",
-                model=settings.ollama_model,
+                "Initialised_gemini_client",
+                model=settings.gemini_model,
             )
-        return self._client
+
+        return self._gemini_client
 
 
 llm_service = LLMService()
