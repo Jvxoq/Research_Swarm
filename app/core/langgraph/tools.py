@@ -12,16 +12,17 @@ def web_search_tool(input: str):
     """
     Get Tavily search tool.
 
-    Returns 5 search results with title, URL, and snippet.
+    Args:
+        input: Search Query
+
+    Returns:
+        Dict with results, answer, etc.
     """
     tool = TavilySearch(
-        max_results=1, # Limited requests
-        search_depth="advanced",
-        include_answer=True,
+        search_depth="basic",
     )
-    search_result = tool.invoke(input)
+    return tool.invoke(input)
 
-    return str(search_result)
 
 # Url Fetch tool
 @tool
@@ -57,7 +58,7 @@ def fetch_content(url: str) -> str:
         text = " ".join(chunk for chunk in chunks if chunk)
 
         # Truncate to avoid token limits
-        max_chars = 80000 # 350 words
+        max_chars = 5000  # 350 words
         if len(text) > max_chars:
             text = text[:max_chars] + "..."
 
