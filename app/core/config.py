@@ -10,10 +10,10 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # LLM
-    ollama_base_url: str = ""
-    ollama_model: str = ""
+    gemini_model: str = ""
+    gemini_api_key: str = ""
 
-    #Embedding Model
+    # Embedding Model
     embedding_model: str = ""
     embedding_model_url: str = ""
 
