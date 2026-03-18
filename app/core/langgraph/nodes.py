@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
+from datetime import datetime
+from google.genai._interactions.types.thought_content import Summary
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -38,6 +40,7 @@ RULES:
 - Return ONLY valid JSON with key: sub_tasks & value: the list of sub-tasks.
 """
 
+
 def orchestrator_node(state: SwarmState) -> dict:
     """Break down research topic into sub-tasks."""
     logger.info("orchestrator_started", topic=state["topic"])
@@ -67,13 +70,14 @@ def orchestrator_node(state: SwarmState) -> dict:
     return {"sub_tasks": validated.sub_tasks}
 
 
-# Router Node
-def router_node(state: SwarmState):
+# Router Edge
+def router_edge(state: SwarmState):
     """Route tasks to workers in parallel.
     
     Input from Orchestrator:
     
-    ['What is the current ...', 'How do upgrades ...', "What is the total ..."]"""
+    ['What is the current ...', 'How do upgrades ...', "What is the total ..."]
+    """
     tasks = state.get("failed_tasks") or state["sub_tasks"]
 
     logger.info("routing_tasks", task_count=len(tasks))
@@ -82,60 +86,67 @@ def router_node(state: SwarmState):
 
 
 # Worker Node
-WORKER_PROMPT = """You are a research assistant.
+WORKER_PROMPT = """
+You are a Research Assistant.
+Analyze the SEARCH RESULTS below and generate a structured research output for the TASK.
 
-Task: {task}
+CRITICAL: 
+Follow INSTRUCTIONS & RULES.
 
-Use the web_search tool to find factual information.
+INSTRUCTIONS:
+- Generate ONE concise claim (single sentence) from the search results
+- Write a short summary paragraph from the search results
+- Keep the source URL from search results
 
-Extract:
-1. ONE key claim (one sentence)
-2. A 1 paragraph summary
-3. Source URL
-4. Confidence (0.7-0.9 based on source quality)
+TASK: {task}
 
-Return JSON:
-{{"task": "{task}", "claim": "...", "summary": "...", "source_url": "...", "confidence": 0.8}}"""
+SEARCH RESULTS: {search_results}
+
+RULES:
+- Use ONLY information from SEARCH RESULTS
+
+OUTPUT FORMAT EXAMPLE:
+{{"task": "{task}", "claim": "...", "summary": "...", "source_url": "..."}}
+"""
 
 
-def worker_node(state: dict) -> dict:
-    """Search web and extract findings."""
-    task = state["task"]
-    logger.info("worker_started", task=task)
-
-    # Get tools
-    web_search = web_search_tool
-    llm_client = llm_service.client
+def worker_node(input: dict) -> dict:
+    """Search web and extract findings.
+    
+    Args:
+        task: Sub-task from Router Edge
+    
+    Returns:
+        State update with worker_result"""
+    logger.info("worker_started", task=input['task'])
 
     # Search web
-    search_results = web_search.invoke(task)
+    search_results = web_search_tool.invoke(str(input['task']))
 
-    # Extract claim from results
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", "You are a research assistant."),
-            ("human", WORKER_PROMPT + f"\n\nSearch results:\n{search_results}"),
+            ("system", "Return ONLY valid JSON. No explanation, no markdown, no extra text."),
+            ("human", WORKER_PROMPT),
         ]
     )
 
-    chain = prompt | llm_client | JsonOutputParser()
-    result = chain.invoke({"task": task})
+    chain = prompt | llm_service.gemini_client | JsonOutputParser()
+    result = chain.invoke({"task": input["task"], "search_results": search_results})
 
     # Validate
     validated = WorkerResult.model_validate(result)
+    logger.info("worker_complete", task=input['task'])
 
-    logger.info("worker_complete", task=task, confidence=validated.confidence)
     return {"worker_results": [validated]}
 
 
 # Critic Node
-CRITIC_PROMPT = """You are a fact-checker.
+CRITIC_PROMPT = """
+You are a fact-checker.
 
-Claim: {claim}
-Source URL: {source_url}
-Page content: {content}
-
-Check if the claim is supported by the content.
+INSTRUCTIONS
+-Check if the CLAIM & SUMMARY is supported by the PAGE CONTENT.
+-Score Confindence accordingly
 
 Score confidence:
 - 0.9-1.0: Directly stated
@@ -143,15 +154,20 @@ Score confidence:
 - 0.4-0.74: Partially supported
 - 0.0-0.39: Not supported
 
+CLAIM: {claim}
+SUMMARY: {summary}
+SOURCE URL: {source_url}
+PAGE CONTENT: {content}
+
 Return JSON:
-{{"task": "{task}", "claim": "{claim}", "source_url": "{source_url}", "confidence": 0.x, "status": "success"}}"""
+{{"task": "{task}", "claim": "{claim}", "source_url": "{source_url}", "summary": {summary}, "confidence": 0.x}}
+"""
 
 
 def critic_node(state: SwarmState) -> dict:
     """Verify worker results."""
     logger.info("critic_started", result_count=len(state["worker_results"]))
 
-    llm_client = llm_service.client
     verified = []
     failed_tasks = []
 
@@ -161,25 +177,29 @@ def critic_node(state: SwarmState) -> dict:
 
         # Verify claim
         prompt = ChatPromptTemplate.from_messages(
-            [("system", "You are a fact-checking assistant."), ("human", CRITIC_PROMPT)]
+            [
+                ("system", "Return ONLY valid JSON. No explanation, no markdown, no extra text."), 
+                ("human", CRITIC_PROMPT)
+            ]
         )
 
-        chain = prompt | llm_client | JsonOutputParser()
+        chain = prompt | llm_service.gemini_client | JsonOutputParser()
         fact = chain.invoke(
             {
                 "task": result.task,
                 "claim": result.claim,
                 "source_url": result.source_url,
+                "summary": result.summary,
                 "content": content,
             }
         )
 
-        verified_fact = VerifiedFact.model_validate(fact)
+        critic_ouput = VerifiedFact.model_validate(fact)
 
-        if verified_fact.confidence >= 0.75:
-            verified.append(verified_fact)
+        if critic_ouput.confidence >= 0.75:
+            verified.append(critic_ouput)
         else:
-            failed_tasks.append(verified_fact.task)
+            failed_tasks.append(critic_ouput)
 
     logger.info("critic_complete", verified=len(verified), failed=len(failed_tasks))
     return {
@@ -193,19 +213,18 @@ def consensus_node(state: SwarmState) -> dict:
     """
     Cluster similar facts and apply voting.
 
-    Flow:
-    1. Store all verified facts in VectorDB
-    2. For each fact, find similar facts (≥0.85 similarity)
-    3. Group into clusters
-    4. Apply voting: cluster size ≥2 = approved
-    5. Return approved and rejected lists
+    Args:
+        state: verified_facts from the graph state
+    
+    Returns:
+        approved_facts: approved facts from verified_facts
+        rejected_facts: rejected facts from verified facts
     """
     logger.info("consensus_started", fact_count=len(state["verified_facts"]))
 
-    vectordb = get_vectordb()
-
     # Create collection per job
-    vectordb.create_collection(state.thread_id)
+    vectordb = get_vectordb()
+    vectordb.create_collection(state['thread_id'])
 
     # Store all facts in VectorDB
     fact_map = {}  # fact_id -> VerifiedFact
@@ -215,7 +234,7 @@ def consensus_node(state: SwarmState) -> dict:
         fact_map[fact_id] = fact
 
         vectordb.store_fact(
-            collection=state.thread_id,
+            collection=state['thread_id'],
             fact_id=fact_id,
             claim=fact.claim,
             metadata={
@@ -228,38 +247,43 @@ def consensus_node(state: SwarmState) -> dict:
     # Find Clusters
     processed = set()
     clusters = []
-
+    print(f"\n\nFact_map -> {fact_map}\n\n")
     for fact_id, fact in fact_map.items():
         if fact_id in processed:
             continue
-
+        
+        print(f"\n\nFact -> {fact}")
         # Find similar facts
-        similar = vectordb.find_similar(
-            collection=state.thread_id, claim=fact.claim, limit=10, threshold=0.85
+        similar_facts = vectordb.find_similar(
+            collection=state['thread_id'], claim=fact.claim,
         )
+        print(f"\n\nSimilar_facts -> {similar_facts}")
 
         # Build cluster
         cluster = []
-        for hit in similar:
-            hit_id = hit["id"]
+        for hit in similar_facts:
+            hit_id = hit.id
             if hit_id not in processed:
                 cluster.append(fact_map[hit_id])
                 processed.add(hit_id)
 
         if cluster:
             clusters.append(cluster)
+        
 
     logger.info("clustering_complete", cluster_count=len(clusters))
 
     MIN_SOURCES = 2
     approved = []
     rejected = []
-
+    print(f"\n\nClusters -> {clusters}\n\n")
     for cluster in clusters:
+        print(f"\n\nCluster -> {cluster}\n\n")
         if len(cluster) >= MIN_SOURCES:
             # Approved: corroborated by multiple sources
             approved_fact = ApprovedFact(
                 claim=cluster[0].claim,  # Use first claim as canonical
+                summary=[fact.summary for fact in clusters[0]],
                 sources=[f.source_url for f in cluster],
                 confidence=sum(f.confidence for f in cluster) / len(cluster),  # Average
                 task=cluster[0].task,
@@ -284,31 +308,24 @@ def consensus_node(state: SwarmState) -> dict:
     return {"approved_facts": approved, "rejected_facts": rejected}
 
 
-# app/core/langgraph/nodes.py
+WRITER_PROMPT = """
+You are a professional Markdown Report Writer.
 
-from datetime import datetime
-from langchain_core.output_parsers import JsonOutputParser
-
-WRITER_PROMPT = """You are a professional research report writer.
-
-Topic: {topic}
-
-Approved Facts:
-{facts}
-
-Instructions:
-1. Create a markdown report with:
+INSTRUCTIONS:
+1. Create a markdown research report about the TOPIC using the SUMMARY with:
    - Title (# heading)
-   - Executive Summary (2-3 paragraphs)
-   - One section (## heading) per approved fact
-   - Cite sources as [1], [2], etc. and list URLs at the end
+   - Executive Summary (1 paragraphs)
+   - One section (## heading) per summary
+   - Cite sources with URL as [1], [2], etc. at the end
 2. Use professional, objective tone
-3. Only use information from approved facts
 
-Return ONLY valid JSON (no explanation):
+TOPIC: {topic}
+SUMMARY: {summary}
+
+RETURN JASON:
 {{
-  "title": "Research Report: [Topic]",
-  "report": "# Title\\n\\n## Executive Summary\\n\\n...full markdown..."
+  "title": "Title...",
+  "report": "Your Generated markdown report..."
 }}
 """
 
@@ -317,35 +334,28 @@ def writer_node(state: SwarmState) -> dict:
     """Compile approved facts into final markdown report."""
     logger.info("writer_started", approved_count=len(state["approved_facts"]))
 
-    facts_text = []
-    for i, fact in enumerate(state["approved_facts"], 1):
-        sources_list = "\n".join(f"  - {url}" for url in fact.sources)
-        fact_block = f"""
-Fact {i}:
-  Claim: {fact.claim}
-  Task: {fact.task}
-  Confidence: {fact.confidence:.2f}
-  Sources: {sources_list}
-"""
-        facts_text.append(fact_block)
+    print(f"\n\nCurrrent State -> {state}")
+    approved_fact = state['approved_facts'][0]
 
-    formatted_facts = "\n".join(facts_text)
+    summaries = "\n".join(approved_fact.summary)
+    final_summary = f"""
+{approved_fact.claim}
 
-    llm_client = llm_service.client()
+{summaries}
+""" 
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", "You are a professional research report writer."),
+            ("system", "Return ONLY valid JSON."),
             ("human", WRITER_PROMPT),
         ]
     )
 
-    chain = prompt | llm_client | JsonOutputParser()
-
+    chain = prompt | llm_service.gemini_client| JsonOutputParser()
     result = chain.invoke(
         {
             "topic": state["topic"],
-            "facts": formatted_facts,
+            "summary": final_summary,
         }
     )
 
