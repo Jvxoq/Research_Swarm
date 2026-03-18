@@ -13,24 +13,24 @@ class WorkerResult(BaseModel):
     claim: str
     summary: str
     source_url: str
-    confidence: float
 
 
 class VerifiedFact(BaseModel):
     """Critic output."""
     task: str
     claim: str
+    summary: str
     source_url: str
     confidence: float
-    status: str  # "success" or "failed"
 
 
 class ApprovedFact(BaseModel):
     """Consensus output."""
+    task: str
     claim: str
+    summary: List[str]
     sources: List[str]
     confidence: float
-    task: str
 
 
 class FinalReport(BaseModel):
