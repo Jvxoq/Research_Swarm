@@ -37,7 +37,7 @@ class VectorDB:
         """Lazy-load Ollama client."""
         if self._ollama_client is None:
             logger.info("initializing_ollama_client")
-            self._ollama_client = Client(host=settings.ollama_base_url)
+            self._ollama_client = Client(host=settings.embedding_model_url)
         return self._ollama_client
 
     @property
@@ -93,7 +93,7 @@ class VectorDB:
             raise
 
     def find_similar(
-        self, collection: str, claim: str, limit: int = 10,
+        self, collection: str, claim: str,
     ) -> List[dict]:
         """Find similar facts in the vector database."""
         try:
@@ -101,10 +101,11 @@ class VectorDB:
             results = self.client.query_points(
                 collection_name=collection,
                 query=embedding,
-                limit=limit,
+                limit=2,
                 with_payload=True,
+                score_threshold=0.8,
             )
-            return results
+            return results.points
         except Exception as e:
             logger.error("find_similar_failed", error=str(e))
             raise
